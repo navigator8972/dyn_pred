@@ -108,6 +108,7 @@ class DynamicsPredictor(object):
         #or maybe we should repeat weights to exploit a multidim matrix operation in one shot...
         pred_mean = []
         pred_var = []
+        
         for i_mu, i_var in zip(input, input_var):
             #ignore covariance between input and output now
             o_post_mu, o_post_var, _, _, _  = get_posterior(i_mu, i_var)
@@ -116,10 +117,11 @@ class DynamicsPredictor(object):
         
         return np.array(pred_mean), np.array(pred_var)
     
-    def predict(self, X, X_Var=None, U=None, U_Var=None):
+    def predict(self, X, X_Var=None, U=None, U_Var=None, XU_CrossVar=None):
         #core inference function
         #U: control input: assume a passive dynamics if control is not given (padding 0?)
         #U_Var: variance of control input: do we need uncertainty about control as well for probabilistic policies?
+        #XU_CrossVar: cross variance between X and U inputs
         #simply a GPR regression if X_Var is None, in which case, returns the predicted mean and covariance
         #otherwise, use Unscented KF like techniques to propagate covariance as well
         # X.shape[0] == X_Var.shape[0]: number of input instances
@@ -135,6 +137,7 @@ class DynamicsPredictor(object):
         if X_Var is not None:
             assert(X_Var.shape[0]==X.shape[0])
             assert(X_Var.shape[1]==X_Var.shape[2] and X_Var.shape[1]==X.shape[1])
+            
             if U_Var is not None:
                 assert(U_Var.shape[0]==U.shape[0])
                 if len(U_Var.shape)==2:
@@ -148,16 +151,23 @@ class DynamicsPredictor(object):
                 #well am wondering if it would be possible do cholesky only X in this case but I guess might break UKF to
                 #generate particles from a degenerated Gaussian, or should we assume a control-affine dynamics here?
                 U_Var=np.array([np.eye(U.shape[1])*1e-4 for i in range(U.shape[0])])
+            if XU_CrossVar is not None:
+                assert(XU_CrossVar.shape[0]==U.shape[0])
+                assert(XU_CrossVar.shape[1]==X.shape[1] and XU_CrossVar.shape[2]==U.shape[1])
+            else:
+                XU_CrossVar=np.array([np.zeros((X.shape[1], U.shape[1])) for i in range(U.shape[0])])
         
         #combine X and U to give input
         combined_input = np.hstack([X, U])
         if X_Var is not None:
-            combined_input_var = np.array([scipy.linalg.block_diag(v_x, v_u) for v_x, v_u in zip(X_Var, U_Var)])
+            #combined_input_var = np.array([scipy.linalg.block_diag(v_x, v_u) for v_x, v_u in zip(X_Var, U_Var)])
+            combined_input_var = np.array([np.block([[v_x, v_xu],
+                                                      [v_xu.T, v_u]]) for v_x, v_u, v_xu in zip(X_Var, U_Var, XU_CrossVar)])
         else:
             combined_input_var = None
 
         if combined_input_var is None:
-            #simply do a GP regression
+            #simply do a normal probabilistic regression
             pred_mean, pred_var = self.model.predict_f(combined_input)
             #note the pred_var is of a flattened shape because the conditional independence
             pred_var = np.array([np.diag(v) for v in pred_var])
@@ -165,7 +175,7 @@ class DynamicsPredictor(object):
             #use unscented kf to propagate combined_input_var as well...
             pred_mean, pred_var = self._predict_with_var_propagated(combined_input, combined_input_var)
         
-        return pred_mean, pred_var 
+        return pred_mean, pred_var
     
     def predict_n_steps(self, n_steps, X0, X0_Var=None, U=None, U_Var=None):
         #recursively applying the dynamics for a long-term prediction from X0. this could be really bad

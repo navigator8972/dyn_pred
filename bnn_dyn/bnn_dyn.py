@@ -63,4 +63,5 @@ class BNNDynamics(object):
     
     def predict_f(self, inputs):
         return self.bnn_model.predict(inputs, factored=False)
+
     
