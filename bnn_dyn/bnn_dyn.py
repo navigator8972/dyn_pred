@@ -64,4 +64,80 @@ class BNNDynamics(object):
     def predict_f(self, inputs):
         return self.bnn_model.predict(inputs, factored=False)
 
+    def predict_trajs(self, X0, U=[None]*9, n_particles=20, prop='TSInf', state_proc=lambda x:x, state_postproc=lambda x, pred:pred, prob=True):
+        '''
+        predict trajectories for given init states
+        following the trajectory sampling schemes like TS1 and TSInf but without backpropagate differentiability
+        X0:             (batch_size, x_dim)
+        U:              (T, u_dim), control can be augmented with predicted state x, could be None if dynamics is passive. Note the same control applies to entire state batch
+        n_particles:    number of particles to obtain the empirical distribution of trajectories
+        prop:           type of particle propagation, TS1/TSInf
+        state_proc:     process state before it feeds to the dynamics model
+        state_postproc: customized process to ensure the next iteration is compatible, e.g., if we pred velocity based on curr pos+vel, we need to augment a pred pos to obtain another pos+vel 
+
+        return:
+        trajs:          (batch_size, n_particles, T, x_dim)
+        '''
+        T = len(U)
+        bs = X0.shape[0]
+        #preprocess x0
+        X_prev = np.vstack([np.tile(x0, (n_particles, 1)) for x0 in X0])    #(batch_size*n_particles, x_dim)
+        trajs = np.empty((bs, n_particles, T+1, X_prev.shape[-1]))
+        
+        for t in range(T):
+            trajs[:, :, t, :] = np.reshape(X_prev, (-1, n_particles, X_prev.shape[-1]))
+            X_proc = state_proc(X_prev)
+
+            if prop == 'TS1':
+                #need to resample   
+                X_proc = np.reshape(X_proc, (-1, n_particles, X_proc.shape[-1]))    #(batch_size, n_particles, x_dim)
+                #for each batch, generate a permutation
+                sort_idx = np.array([np.random.permutation(n_particles) for _ in range(X_proc.shape[0])])      #(batch_size, n_particles)
+                tmp = np.tile(np.arange(X_proc.shape[0])[:, None], [1, n_particles])[:, :, None]        #(batch_size) --> (batch_size, 1) --> (batch_size, n_particles) --> (bs, np, 1)
+                #have some issues here for TS1, what to use in numpy for tf.gather_nd?
+                idxs = np.concatenate([tmp, sort_idx[:, :, None]], axis=-1)                         #(bs, np, 2)   
+                X_proc = np.take(X_proc, idxs)                                                      #(bs, np, xdim)
+                X_proc = np.reshape(X_proc, (-1, X_proc.shape[-1]))                                 #(bs*np, xdim)
+
+            X_proc = self._expand_to_ts_format(X_proc, n_particles)
+            #see if there is control to apply
+            if U[t] is not None:
+                #combine this control
+                U_proc = self._expand_to_ts_format(np.tile(U[t], (bs*n_particles, 1), n_particles))
+                inputs = np.concatenate((X_proc, U_proc), axis=-1)
+            else:
+                inputs = X_proc
+
+            mean, var = self.bnn_model.predict(inputs, factored=True)
+            if prob:
+                #take a sample if we expect a probabilistic output
+                pred = mean + np.random.randn(*(mean.shape)) * np.sqrt(var)
+            else:
+                #take mean as the decision making here
+                pred = mean
+
+            pred = self._flatten_to_matrix(pred, n_particles)
+            if prop == 'TS1':
+                '''
+                reverse that process
+                '''
+                pred = np.reshape(pred, (-1, n_particles, pred.shape[-1]))
+                sort_idx = sort_idx[:, ::-1]
+                idxs = np.concatenate([tmp, sort_idx[:, :, None]], axis=-1)
+                pred = np.take(pred, idxs)                                                      
+                pred = np.reshape(pred, (-1, pred.shape[-1]))
+
+            X_prev = state_postproc(X_prev, pred)
+        
+        trajs[:, :, T, :] = np.reshape(X_prev, (-1, n_particles, X_prev.shape[-1]))
+        return trajs
+    
+    def _expand_to_ts_format(self, mat, n_particles):
+        xdim = mat.shape[-1]
+        return np.reshape(np.transpose(np.reshape(mat, (-1, self.n_ensemble, n_particles//self.n_ensemble, xdim)), [1, 0, 2, 3]), [self.n_ensemble, -1, xdim])
+    
+    def _flatten_to_matrix(self, ts_fmt_arr, n_particles):
+        xdim = ts_fmt_arr.shape[-1]
+        return np.reshape(np.transpose(np.reshape(ts_fmt_arr, [self.n_ensemble, -1, n_particles//self.n_ensemble, xdim]), [1, 0, 2, 3]), [-1, xdim])
+
     
