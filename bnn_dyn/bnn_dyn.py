@@ -93,11 +93,13 @@ class BNNDynamics(object):
                 X_proc = np.reshape(X_proc, (-1, n_particles, X_proc.shape[-1]))    #(batch_size, n_particles, x_dim)
                 #for each batch, generate a permutation
                 sort_idx = np.array([np.random.permutation(n_particles) for _ in range(X_proc.shape[0])])      #(batch_size, n_particles)
-                tmp = np.tile(np.arange(X_proc.shape[0])[:, None], [1, n_particles])[:, :, None]        #(batch_size) --> (batch_size, 1) --> (batch_size, n_particles) --> (bs, np, 1)
+                #tmp = np.tile(np.arange(X_proc.shape[0])[:, None], [1, n_particles])[:, :, None]        #(batch_size) --> (batch_size, 1) --> (batch_size, n_particles) --> (bs, np, 1)
                 #have some issues here for TS1, what to use in numpy for tf.gather_nd?
-                idxs = np.concatenate([tmp, sort_idx[:, :, None]], axis=-1)                         #(bs, np, 2)   
-                X_proc = np.take(X_proc, idxs)                                                      #(bs, np, xdim)
-                X_proc = np.reshape(X_proc, (-1, X_proc.shape[-1]))                                 #(bs*np, xdim)
+                #idxs = np.concatenate([tmp, sort_idx[:, :, None]], axis=-1)                         #(bs, np, 2)   
+                tmp = np.tile(np.arange(X_proc.shape[0])[:, None], [1, n_particles]).flatten()        #(batch_size) --> (batch_size, 1) --> (batch_size, n_particles) --> (batch_size*n_particles)
+                
+                X_proc = X_proc[tmp, sort_idx.flatten(), :]                                            #(bs*np, xdim)
+                #X_proc = np.reshape(X_proc, (-1, X_proc.shape[-1]))                                 #(bs*np, xdim)
 
             X_proc = self._expand_to_ts_format(X_proc, n_particles)
             #see if there is control to apply
@@ -121,11 +123,16 @@ class BNNDynamics(object):
                 '''
                 reverse that process
                 '''
-                pred = np.reshape(pred, (-1, n_particles, pred.shape[-1]))
-                sort_idx = sort_idx[:, ::-1]
-                idxs = np.concatenate([tmp, sort_idx[:, :, None]], axis=-1)
-                pred = np.take(pred, idxs)                                                      
-                pred = np.reshape(pred, (-1, pred.shape[-1]))
+                pred = np.reshape(pred, (-1, n_particles, pred.shape[-1]))      #(bs, np, pdim)
+                sort_idx_reversed = np.empty(sort_idx.shape, dtype=int)
+                for b in range(sort_idx.shape[0]):
+                    for i in range(sort_idx.shape[1]):
+                        sort_idx_reversed[b][sort_idx[b][i]] = i
+                #sort_idx = np.array([[b_idx for i, _ in enumerate(b_idx)] for b_idx in sort_idx])
+                #idxs = np.concatenate([tmp, sort_idx[:, :, None]], axis=-1)
+                #pred = np.take(pred, idxs)                                                      
+                #pred = np.reshape(pred, (-1, pred.shape[-1]))
+                pred = pred[tmp, sort_idx_reversed.flatten(), :]
 
             X_prev = state_postproc(X_prev, pred)
         
